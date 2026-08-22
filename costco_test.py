@@ -1,52 +1,55 @@
 import requests
-import json
 
-# Costco item numbers we're testing
-ITEMS = {
-    "Jack Daniel's 10 Year - SKU 1605257": "1605257",
-    "Jack Daniel's 10 Year - SKU 1740448": "1740448",
-}
-
-# Sacramento Costco
+ITEM_NUMBER = "1605257"
 WAREHOUSE = "464"
 
 print("=" * 60)
-print("COSTCO BOURBON RADAR - LIVE TEST")
+print("COSTCO BOURBON RADAR - API TEST")
 print("=" * 60)
-print(f"Warehouse: Costco #{WAREHOUSE}")
+print(f"Item: {ITEM_NUMBER}")
+print(f"Warehouse: {WAREHOUSE}")
 print()
 
-# Costco's public search endpoint
+# Current Costco API endpoint documented by the
+# open-source Costco integration we're testing against.
 url = "https://gdx-api.costco.com/"
 
-headers = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json",
+params = {
+    "itemNumber": ITEM_NUMBER,
+    "warehouseNumber": WAREHOUSE,
 }
 
-for name, item_number in ITEMS.items():
+headers = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36",
+    "Accept": "application/json",
+    "Origin": "https://www.costco.com",
+    "Referer": "https://www.costco.com/",
+}
 
-    print(f"Testing: {name}")
-    print(f"Item number: {item_number}")
+try:
+    response = requests.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=30
+    )
 
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=20
-        )
+    print("URL requested:")
+    print(response.url)
+    print()
+    print("HTTP status:", response.status_code)
+    print("Response length:", len(response.text))
+    print()
 
-        print(f"HTTP status: {response.status_code}")
-        print(f"Response length: {len(response.text)}")
+    if response.text:
+        print("Response:")
+        print(response.text[:5000])
+    else:
+        print("EMPTY RESPONSE")
 
-        if response.text:
-            print("Response preview:")
-            print(response.text[:500])
-
-    except Exception as e:
-        print(f"ERROR: {e}")
-
-    print("-" * 60)
+except Exception as e:
+    print("REQUEST ERROR:", repr(e))
 
 print()
-print("LIVE COSTCO CONNECTION TEST COMPLETE")
+print("API TEST COMPLETE")
