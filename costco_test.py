@@ -1,84 +1,49 @@
+import requests
 import json
-from playwright.sync_api import sync_playwright
 
-ITEM_NUMBER = "1605257"
+URL = "https://gdx-api.costco.com/catalog/search/api/v1/search"
+
+payload = {
+    "query": "Jack Daniel's 10 Year",
+    "pageSize": 24,
+    "offset": 0
+}
+
+headers = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Origin": "https://www.costco.com",
+    "Referer": "https://www.costco.com/"
+}
 
 print("=" * 70)
-print("COSTCO BOURBON RADAR - API TRANSPORT TEST")
+print("COSTCO BOURBON RADAR - LIVE SEARCH")
 print("=" * 70)
-print(f"Testing item: {ITEM_NUMBER}")
+print()
+print("Endpoint:", URL)
+print("Search:", payload["query"])
 print()
 
-with sync_playwright() as p:
-    request = p.request.new_context(
-        extra_http_headers={
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/139.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+try:
+    response = requests.post(
+        URL,
+        json=payload,
+        headers=headers,
+        timeout=30
     )
 
-    try:
-        # Costco product GraphQL endpoint
-        url = "https://ecom-api.costco.com/graphql"
+    print("HTTP status:", response.status_code)
+    print("Response length:", len(response.text))
+    print()
 
-        query = """
-        query Product($itemNumbers: [String!]!) {
-          products(itemNumbers: $itemNumbers) {
-            itemNumber
-            name
-            price
-          }
-        }
-        """
+    print("RESPONSE:")
+    print(response.text[:15000])
 
-        payload = {
-            "query": query,
-            "variables": {
-                "itemNumbers": [ITEM_NUMBER]
-            }
-        }
-
-        print("Requesting Costco product data...")
-        print("Endpoint:", url)
-        print()
-
-        response = request.post(
-            url,
-            data=json.dumps(payload),
-            timeout=60000
-        )
-
-        print("HTTP status:", response.status)
-        print("Response length:", len(response.text()))
-        print()
-
-        body = response.text()
-
-        if body:
-            try:
-                data = json.loads(body)
-                print("RESPONSE:")
-                print(json.dumps(data, indent=2)[:15000])
-            except Exception:
-                print("RAW RESPONSE:")
-                print(body[:15000])
-        else:
-            print("EMPTY RESPONSE")
-
-    except Exception as e:
-        print("ERROR:")
-        print(repr(e))
-
-    finally:
-        request.dispose()
+except Exception as e:
+    print("ERROR:", repr(e))
 
 print()
 print("=" * 70)
-print("API TRANSPORT TEST COMPLETE")
+print("SEARCH TEST COMPLETE")
 print("=" * 70)
