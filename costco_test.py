@@ -1,50 +1,46 @@
 import requests
+import json
 
-ITEM_NUMBER = "1605257"
-WAREHOUSE = "464"
+SEARCH_URL = "https://gdx-api.costco.com/catalog/search"
 
-print("=" * 60)
-print("COSTCO BOURBON RADAR - API TEST")
-print("=" * 60)
-print(f"Item: {ITEM_NUMBER}")
-print(f"Warehouse: {WAREHOUSE}")
-print()
-
-# Current Costco API endpoint documented by the
-# open-source Costco integration we're testing against.
-url = "https://gdx-api.costco.com/"
-
-params = {
-    "itemNumber": ITEM_NUMBER,
-    "warehouseNumber": WAREHOUSE,
+payload = {
+    "query": "Jack Daniel's 10 Year",
+    "pageSize": 24,
+    "offset": 0
 }
 
 headers = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
+    "Content-Type": "application/json",
     "Origin": "https://www.costco.com",
     "Referer": "https://www.costco.com/",
 }
 
+print("=" * 60)
+print("COSTCO BOURBON RADAR - PRODUCT SEARCH TEST")
+print("=" * 60)
+print()
+
 try:
-    response = requests.get(
-        url,
-        params=params,
+    response = requests.post(
+        SEARCH_URL,
+        json=payload,
         headers=headers,
         timeout=30
     )
 
-    print("URL requested:")
-    print(response.url)
-    print()
+    print("URL:", SEARCH_URL)
     print("HTTP status:", response.status_code)
     print("Response length:", len(response.text))
     print()
 
     if response.text:
-        print("Response:")
-        print(response.text[:5000])
+        try:
+            data = response.json()
+            print(json.dumps(data, indent=2)[:15000])
+        except Exception:
+            print(response.text[:15000])
     else:
         print("EMPTY RESPONSE")
 
@@ -52,4 +48,4 @@ except Exception as e:
     print("REQUEST ERROR:", repr(e))
 
 print()
-print("API TEST COMPLETE")
+print("PRODUCT SEARCH TEST COMPLETE")
