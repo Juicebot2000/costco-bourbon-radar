@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Show Python version
-        run: python --version
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       - name: Run Costco test
         run: python costco_test.py
