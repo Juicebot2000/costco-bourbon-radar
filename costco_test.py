@@ -4,38 +4,28 @@ from playwright.sync_api import sync_playwright
 ITEM_NUMBER = "1605257"
 
 print("=" * 70)
-print("COSTCO BOURBON RADAR - PLAYWRIGHT TEST")
+print("COSTCO BOURBON RADAR - API TRANSPORT TEST")
 print("=" * 70)
-print(f"Testing Costco item: {ITEM_NUMBER}")
+print(f"Testing item: {ITEM_NUMBER}")
 print()
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/139.0.0.0 Safari/537.36"
-        )
+    request = p.request.new_context(
+        extra_http_headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/139.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
     )
 
-    page = context.new_page()
-
     try:
-        print("Opening Costco...")
-        response = page.goto(
-            "https://www.costco.com/",
-            wait_until="domcontentloaded",
-            timeout=60000
-        )
-
-        print("Costco page status:", response.status if response else "NO RESPONSE")
-        print("Page title:", page.title())
-        print()
-
-        # Test Costco's product GraphQL service through the browser context.
-        api_url = "https://ecom-api.costco.com/graphql"
+        # Costco product GraphQL endpoint
+        url = "https://ecom-api.costco.com/graphql"
 
         query = """
         query Product($itemNumbers: [String!]!) {
@@ -54,45 +44,41 @@ with sync_playwright() as p:
             }
         }
 
-        print("Testing Costco product API...")
-        print("Endpoint:", api_url)
+        print("Requesting Costco product data...")
+        print("Endpoint:", url)
         print()
 
-        api_response = page.request.post(
-            api_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+        response = request.post(
+            url,
+            data=json.dumps(payload),
             timeout=60000
         )
 
-        print("API HTTP status:", api_response.status)
-        print("API response length:", len(api_response.text()))
+        print("HTTP status:", response.status)
+        print("Response length:", len(response.text()))
         print()
 
-        body = api_response.text()
+        body = response.text()
 
         if body:
             try:
                 data = json.loads(body)
-                print("API RESPONSE:")
+                print("RESPONSE:")
                 print(json.dumps(data, indent=2)[:15000])
             except Exception:
                 print("RAW RESPONSE:")
                 print(body[:15000])
         else:
-            print("EMPTY API RESPONSE")
+            print("EMPTY RESPONSE")
 
     except Exception as e:
         print("ERROR:")
         print(repr(e))
 
     finally:
-        browser.close()
+        request.dispose()
 
 print()
 print("=" * 70)
-print("PLAYWRIGHT TEST COMPLETE")
+print("API TRANSPORT TEST COMPLETE")
 print("=" * 70)
