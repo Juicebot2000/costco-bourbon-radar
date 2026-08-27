@@ -1,32 +1,28 @@
-```python
 import requests
 import re
-import json
-import uuid
+import time
 from datetime import datetime
+
 
 # ================================================================
 # COSTCO BOURBON RADAR - SEARCH ENGINE V5
 # ================================================================
 #
+# IMPORTANT:
+# This file intentionally contains NO Markdown backticks.
+#
 # V5 goals:
-#
-# 1. Reproduce Costco's browser-style search request as closely
-#    as possible.
-#
-# 2. Keep the bourbon matching STRICT.
-#
-# 3. Never treat generic words such as "12", "gold", "bourbon",
-#    or "whiskey" as proof that a product is a target bottle.
-#
-# 4. Save the raw Costco response when useful for debugging.
+#   - Establish a Costco web session first
+#   - Use browser-like headers
+#   - Handle Costco 401 credential rotation cleanly
+#   - Search all target bottles
+#   - Strict target matching
+#   - Reject false positives
+#   - Deduplicate results
+#   - Report warehouse inventory and price
 #
 # ================================================================
 
-
-# ================================================================
-# CONFIGURATION
-# ================================================================
 
 WAREHOUSE_ID = "471-wh"
 ZIP_CODE = "95765"
@@ -35,30 +31,41 @@ SEARCH_URL = (
     "https://gdx-api.costco.com/catalog/search/api/v1/search"
 )
 
-# Set to True while debugging Costco API changes.
-SAVE_RAW_RESPONSES = True
+COSTCO_HOME = "https://www.costco.com/"
 
-RAW_RESPONSE_FILE = "costco_raw_response.json"
+# Costco has changed client identifiers over time.
+#
+# USBC was the identifier that worked in the earlier tests.
+# The newer identifier below has been publicly observed in
+# current Costco catalog clients.
+#
+# The script will try these in order.
+CLIENT_IDENTIFIERS = [
+    "USBC",
+    "168287ea-1201-45f6-9b45-5bbea49f8ee7",
+]
+
 
 # ================================================================
-# SESSION
+# HEADERS
 # ================================================================
 
-session = requests.Session()
-
-# Browser-like headers.
-#
-# IMPORTANT:
-# These are intentionally kept separate from the payload so that
-# the request can be adjusted without changing the search logic.
-#
-HEADERS = {
+BASE_HEADERS = {
     "accept": "application/json, text/plain, */*",
     "accept-language": "en-US,en;q=0.9",
-    "client_id": "USBC",
     "content-type": "application/json",
     "origin": "https://www.costco.com",
     "referer": "https://www.costco.com/",
+    "sec-ch-ua": (
+        '"Chromium";v="149", '
+        '"Google Chrome";v="149", '
+        '"Not=A?Brand";v="99"'
+    ),
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
     "user-agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -68,7 +75,7 @@ HEADERS = {
 
 
 # ================================================================
-# TARGET BOURBON LIST
+# TARGET BOURBONS
 # ================================================================
 
 TARGETS = {
@@ -112,13 +119,11 @@ TARGETS = {
     "Old Forester 1924": [
         "old forester 1924",
         "old forester 1924 bourbon",
-        "old forester 1924 year",
     ],
 
     "Weller Full Proof": [
         "weller full proof",
         "weller fullproof",
-        "weller full-proof",
     ],
 
     "Weller Antique 107": [
@@ -128,18 +133,15 @@ TARGETS = {
     ],
 
     "Eagle Rare 10 Year": [
+        "eagle rare",
         "eagle rare 10",
         "eagle rare 10 year",
         "eagle rare 10 year old",
-        "eagle rare bourbon",
-        "eagle rare bourbon whiskey",
     ],
 
     "Blanton's": [
-        "blanton's bourbon",
-        "blantons bourbon",
-        "blanton's single barrel",
-        "blantons single barrel",
+        "blanton's",
+        "blantons",
     ],
 
     "Blanton's Gold": [
@@ -147,7 +149,6 @@ TARGETS = {
         "blantons gold",
         "blanton gold",
         "blantons gold edition",
-        "blanton's gold edition",
     ],
 
     "E.H. Taylor Barrel Proof": [
@@ -167,7 +168,6 @@ TARGETS = {
 
 SEARCH_QUERIES = [
 
-    # Jack Daniel's
     "Jack Daniel's",
     "Jack Daniel's Tennessee Whiskey",
     "Jack Daniel's Single Barrel",
@@ -175,27 +175,22 @@ SEARCH_QUERIES = [
     "Jack Daniel's 12",
     "Jack Daniel's 14",
 
-    # Old Forester
     "Old Forester",
     "Old Forester Whiskey",
     "Old Forester 1924",
 
-    # Weller
     "Weller",
     "Weller Bourbon",
     "Weller Full Proof",
     "Weller Antique 107",
 
-    # Eagle Rare
     "Eagle Rare",
     "Eagle Rare Bourbon",
 
-    # Blanton's
     "Blanton's",
     "Blanton's Bourbon",
     "Blanton's Gold",
 
-    # E.H. Taylor
     "E.H. Taylor",
     "E.H. Taylor Bourbon",
     "E.H. Taylor Barrel Proof",
@@ -203,13 +198,19 @@ SEARCH_QUERIES = [
 
 
 # ================================================================
-# TEXT HELPERS
+# SESSION
+# ================================================================
+
+session = requests.Session()
+
+session.headers.update(BASE_HEADERS)
+
+
+# ================================================================
+# NORMALIZATION
 # ================================================================
 
 def normalize_text(value):
-    """
-    Convert text to a consistent lowercase representation.
-    """
 
     if value is None:
         return ""
@@ -217,22 +218,19 @@ def normalize_text(value):
     value = str(value).lower()
 
     value = value.replace("’", "'")
-    value = value.replace("–", "-")
-    value = value.replace("—", "-")
 
     value = re.sub(r"[^a-z0-9]+", " ", value)
-    value = re.sub(r"\s+", " ", value)
 
-    return value.strip()
+    value = re.sub(r"\s+", " ", value).strip()
 
+    return value
+
+
+# ================================================================
+# BRAND
+# ================================================================
 
 def get_brand(product):
-    """
-    Costco may return brand as:
-        ["Kirkland Signature"]
-    or:
-        "Kirkland Signature"
-    """
 
     brand = product.get("brand", "")
 
@@ -242,9 +240,13 @@ def get_brand(product):
     return str(brand or "")
 
 
+# ================================================================
+# TITLE
+# ================================================================
+
 def get_title(product):
 
-    fields = [
+    possible_fields = [
         "title",
         "name",
         "productName",
@@ -253,44 +255,7 @@ def get_title(product):
         "variant_title",
     ]
 
-    for field in fields:
-
-        value = product.get(field)
-
-        if value:
-            return str(value)
-
-    return ""
-
-
-def get_product_id(product):
-
-    fields = [
-        "productId",
-        "productID",
-        "product_id",
-        "id",
-    ]
-
-    for field in fields:
-
-        value = product.get(field)
-
-        if value:
-            return str(value)
-
-    return ""
-
-
-def get_variant_id(product):
-
-    fields = [
-        "variantId",
-        "variantID",
-        "variant_id",
-    ]
-
-    for field in fields:
+    for field in possible_fields:
 
         value = product.get(field)
 
@@ -301,7 +266,50 @@ def get_variant_id(product):
 
 
 # ================================================================
-# INVENTORY / PRICE
+# PRODUCT ID
+# ================================================================
+
+def get_product_id(product):
+
+    for field in [
+        "productId",
+        "productID",
+        "product_id",
+        "itemNumber",
+        "item_number",
+        "id",
+    ]:
+
+        value = product.get(field)
+
+        if value:
+            return str(value)
+
+    return ""
+
+
+# ================================================================
+# VARIANT ID
+# ================================================================
+
+def get_variant_id(product):
+
+    for field in [
+        "variantId",
+        "variantID",
+        "variant_id",
+    ]:
+
+        value = product.get(field)
+
+        if value:
+            return str(value)
+
+    return ""
+
+
+# ================================================================
+# INVENTORY
 # ================================================================
 
 def extract_inventory(product):
@@ -318,11 +326,13 @@ def extract_inventory(product):
         "warehouse_availability",
         "availability",
         "inventoryStatus",
+        "inventory_status",
     ]:
 
         if product.get(field) is not None:
 
             inventory = product.get(field)
+
             break
 
     for field in [
@@ -334,6 +344,7 @@ def extract_inventory(product):
         if product.get(field) is not None:
 
             price = product.get(field)
+
             break
 
     # ------------------------------------------------------------
@@ -352,6 +363,7 @@ def extract_inventory(product):
             warehouse = str(
                 item.get("warehouseId")
                 or item.get("warehouse")
+                or item.get("warehouseCode")
                 or ""
             )
 
@@ -385,6 +397,7 @@ def extract_inventory(product):
             warehouse = str(
                 variant.get("warehouseId")
                 or variant.get("warehouse")
+                or variant.get("warehouseCode")
                 or ""
             )
 
@@ -393,6 +406,7 @@ def extract_inventory(product):
                 inventory = (
                     variant.get("inventory")
                     or variant.get("availability")
+                    or variant.get("status")
                     or inventory
                 )
 
@@ -405,7 +419,7 @@ def extract_inventory(product):
 
 
 # ================================================================
-# URL
+# COSTCO URL
 # ================================================================
 
 def build_product_url(product_id):
@@ -423,79 +437,7 @@ def build_product_url(product_id):
 
 
 # ================================================================
-# COSTCO RESPONSE EXTRACTION
-# ================================================================
-
-def extract_products(data):
-
-    if not isinstance(data, dict):
-        return []
-
-    # Direct structures
-    for key in [
-        "products",
-        "results",
-        "items",
-    ]:
-
-        products = data.get(key)
-
-        if isinstance(products, list):
-            return products
-
-    # searchResults
-    search_results = data.get("searchResults")
-
-    if isinstance(search_results, dict):
-
-        for key in [
-            "products",
-            "items",
-            "results",
-        ]:
-
-            products = search_results.get(key)
-
-            if isinstance(products, list):
-                return products
-
-    # searchResult
-    search_result = data.get("searchResult")
-
-    if isinstance(search_result, dict):
-
-        for key in [
-            "products",
-            "items",
-            "results",
-        ]:
-
-            products = search_result.get(key)
-
-            if isinstance(products, list):
-                return products
-
-    # searchResultProvider / GRS style response
-    provider = data.get("searchResultProvider")
-
-    if provider:
-
-        for key in [
-            "products",
-            "items",
-            "results",
-        ]:
-
-            products = data.get(key)
-
-            if isinstance(products, list):
-                return products
-
-    return []
-
-
-# ================================================================
-# STRICT NON-BOURBON FILTER
+# NON-BOURBON FILTER
 # ================================================================
 
 def is_obvious_non_bourbon(title, brand):
@@ -506,27 +448,25 @@ def is_obvious_non_bourbon(title, brand):
 
     reject_terms = [
 
-        # Household
         "paper towel",
+        "paper towels",
         "facial tissue",
-        "toilet paper",
-
-        # Drinks that are not bourbon
         "energy drink",
         "sparkling water",
-        "waterloo",
-        "chardonnay",
-        "cabernet",
-        "wine",
-        "beer",
-
-        # Food
         "beef stick",
         "caviar",
-        "honey",
-        "cheese",
+        "honey caviar",
+        "chardonnay",
+        "cabernet",
+        "wine decanter",
+        "atv",
+        "electric youth",
 
-        # Travel
+        "restoril",
+        "folbee",
+        "paxil",
+        "glyburide",
+
         "costco travel",
         "experience colorado",
         "experience tennessee",
@@ -534,20 +474,10 @@ def is_obvious_non_bourbon(title, brand):
         "ihg hotels",
         "seabourn",
 
-        # Medication
-        "restoril",
-        "folbee",
-        "paxil",
-        "glyburide",
-
-        # Vehicles
-        "atv",
-        "electric youth",
-
-        # Barware
-        "wine decanter",
-        "decanter",
-
+        "gift card",
+        "egift card",
+        "restaurant",
+        "hotel",
     ]
 
     for term in reject_terms:
@@ -559,26 +489,17 @@ def is_obvious_non_bourbon(title, brand):
 
 
 # ================================================================
-# TARGET MATCHING
+# STRICT TARGET MATCHING
 # ================================================================
 
-def target_match_score(
-    target_name,
-    title,
-    brand
-):
+def target_match_score(target_name, title, brand):
 
     title_norm = normalize_text(title)
     brand_norm = normalize_text(brand)
 
-    # ------------------------------------------------------------
-    # IMPORTANT:
-    #
-    # Target identity must appear in the PRODUCT itself.
-    #
-    # We intentionally do NOT use the Costco search query here.
-    #
-    # ------------------------------------------------------------
+    combined = (
+        f"{title_norm} {brand_norm}"
+    ).strip()
 
     aliases = TARGETS.get(
         target_name,
@@ -595,60 +516,17 @@ def target_match_score(
         if not alias_norm:
             continue
 
-        # Exact phrase in title
-        if alias_norm in title_norm:
+        # --------------------------------------------------------
+        # Alias must appear as a phrase.
+        # --------------------------------------------------------
+
+        if alias_norm in combined:
 
             score = 100
 
-            # Brand also confirms identity
-            if target_name.startswith(
-                "Jack Daniel"
-            ) and "jack daniel" in title_norm:
-
-                score += 10
-
-            if target_name.startswith(
-                "Old Forester"
-            ) and "old forester" in title_norm:
-
-                score += 10
-
-            if target_name.startswith(
-                "Weller"
-            ) and "weller" in title_norm:
-
-                score += 10
-
-            if target_name.startswith(
-                "Eagle Rare"
-            ) and "eagle rare" in title_norm:
-
-                score += 10
-
-            if target_name.startswith(
-                "Blanton"
-            ) and "blanton" in title_norm:
-
-                score += 10
-
-            if target_name.startswith(
-                "E.H. Taylor"
-            ) and (
-                "taylor" in title_norm
-                or "eh taylor" in title_norm
-            ):
-
-                score += 10
-
-            if score > best_score:
-
-                best_score = score
-                best_alias = alias
-
-        # Exact phrase in brand
-        elif alias_norm in brand_norm:
-
-            score = 90
+            # Product title is stronger than brand field.
+            if alias_norm in title_norm:
+                score += 20
 
             if score > best_score:
 
@@ -659,13 +537,10 @@ def target_match_score(
 
 
 # ================================================================
-# PRODUCT CLASSIFICATION
+# CLASSIFY
 # ================================================================
 
-def classify_product(
-    target_name,
-    product
-):
+def classify_product(target_name, product):
 
     title = get_title(product)
     brand = get_brand(product)
@@ -697,63 +572,83 @@ def classify_product(
         brand
     )
 
-    # ------------------------------------------------------------
-    # CONFIRMED
-    # ------------------------------------------------------------
-
     if score >= 100:
 
         return (
             "CONFIRMED",
             score,
             alias,
-            "Exact target expression found in product"
+            "Exact target expression found"
         )
 
-    # ------------------------------------------------------------
-    # REVIEW
-    # ------------------------------------------------------------
-
-    if score >= 90:
+    if score >= 60:
 
         return (
             "REVIEW",
             score,
             alias,
-            "Possible target identity found"
+            "Possible target match"
         )
-
-    # ------------------------------------------------------------
-    # REJECTED
-    # ------------------------------------------------------------
 
     return (
         "REJECTED",
         score,
         alias,
-        "Target expression not present in product"
+        "Target expression not found"
     )
 
 
 # ================================================================
-# COSTCO API REQUEST
+# OPEN COSTCO FIRST
 # ================================================================
 
-def search_costco(query):
+def establish_costco_session():
 
-    # ------------------------------------------------------------
-    # New visitor ID for this session.
-    #
-    # This avoids using the same artificial visitor ID every run.
-    # ------------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("ESTABLISHING COSTCO WEB SESSION")
+    print("=" * 70)
 
-    visitor_id = str(
-        uuid.uuid4()
-    )
+    try:
+
+        response = session.get(
+            COSTCO_HOME,
+            timeout=30,
+        )
+
+        print(
+            f"Costco homepage HTTP: "
+            f"{response.status_code}"
+        )
+
+        print(
+            f"Session cookies: "
+            f"{len(session.cookies)}"
+        )
+
+        return response.status_code == 200
+
+    except Exception as e:
+
+        print(
+            f"Costco homepage request failed: {e}"
+        )
+
+        return False
+
+
+# ================================================================
+# SEARCH COSTCO
+# ================================================================
+
+def search_costco(query, client_identifier):
 
     payload = {
 
-        "visitorId": visitor_id,
+        "visitorId": (
+            "bourbon-radar-v5-"
+            + str(int(time.time()))
+        ),
 
         "query": query,
 
@@ -766,8 +661,11 @@ def search_costco(query):
         "shipToPostal": ZIP_CODE,
 
         "shipToState": "CA",
-
     }
+
+    headers = dict(BASE_HEADERS)
+
+    headers["client_id"] = client_identifier
 
     try:
 
@@ -775,71 +673,155 @@ def search_costco(query):
 
             SEARCH_URL,
 
-            headers=HEADERS,
+            headers=headers,
 
             json=payload,
 
             timeout=30,
-
         )
 
         return response
 
-    except requests.RequestException as e:
+    except Exception as e:
 
-        print()
-        print("REQUEST ERROR")
-        print("-" * 70)
-        print(str(e))
+        print(
+            f"REQUEST ERROR: {e}"
+        )
 
         return None
 
 
 # ================================================================
-# SAVE RAW RESPONSE
+# EXTRACT PRODUCTS
 # ================================================================
 
-def save_raw_response(
-    query,
-    response,
-    data
-):
+def extract_products(data):
 
-    if not SAVE_RAW_RESPONSES:
-        return
+    if not isinstance(data, dict):
+        return []
 
-    try:
+    # ------------------------------------------------------------
+    # Direct structures
+    # ------------------------------------------------------------
 
-        record = {
+    for key in [
+        "products",
+        "results",
+        "items",
+    ]:
 
-            "timestamp": datetime.now().isoformat(),
+        products = data.get(key)
 
-            "query": query,
+        if isinstance(products, list):
+            return products
 
-            "http_status": response.status_code,
+    # ------------------------------------------------------------
+    # searchResults
+    # ------------------------------------------------------------
 
-            "response": data,
+    search_results = data.get(
+        "searchResults"
+    )
 
-        }
+    if isinstance(search_results, dict):
 
-        with open(
-            RAW_RESPONSE_FILE,
-            "w",
-            encoding="utf-8"
-        ) as f:
+        for key in [
+            "products",
+            "items",
+            "results",
+        ]:
 
-            json.dump(
-                record,
-                f,
-                indent=2,
-                ensure_ascii=False
-            )
+            products = search_results.get(key)
 
-    except Exception as e:
+            if isinstance(products, list):
+                return products
 
-        print(
-            f"Could not save raw response: {e}"
-        )
+    # ------------------------------------------------------------
+    # searchResult
+    # ------------------------------------------------------------
+
+    search_result = data.get(
+        "searchResult"
+    )
+
+    if isinstance(search_result, dict):
+
+        for key in [
+            "products",
+            "items",
+            "results",
+        ]:
+
+            products = search_result.get(key)
+
+            if isinstance(products, list):
+                return products
+
+    # ------------------------------------------------------------
+    # provider response
+    # ------------------------------------------------------------
+
+    provider = data.get(
+        "searchResultProvider"
+    )
+
+    if isinstance(provider, dict):
+
+        for key in [
+            "products",
+            "items",
+            "results",
+        ]:
+
+            products = provider.get(key)
+
+            if isinstance(products, list):
+                return products
+
+    # ------------------------------------------------------------
+    # Recursive fallback
+    #
+    # Costco occasionally changes nesting.
+    # ------------------------------------------------------------
+
+    def find_product_list(obj):
+
+        if isinstance(obj, dict):
+
+            for key, value in obj.items():
+
+                if key.lower() in [
+                    "products",
+                    "items",
+                    "results",
+                ]:
+
+                    if isinstance(value, list):
+
+                        if all(
+                            isinstance(x, dict)
+                            for x in value
+                        ):
+
+                            return value
+
+                found = find_product_list(value)
+
+                if found:
+                    return found
+
+        elif isinstance(obj, list):
+
+            for item in obj:
+
+                found = find_product_list(item)
+
+                if found:
+                    return found
+
+        return []
+
+    return find_product_list(data)
 
 
 # ================================================================
@@ -856,16 +838,10 @@ def print_product(
 ):
 
     title = get_title(product)
-
     brand = get_brand(product)
 
-    product_id = get_product_id(
-        product
-    )
-
-    variant_id = get_variant_id(
-        product
-    )
+    product_id = get_product_id(product)
+    variant_id = get_variant_id(product)
 
     inventory, price = extract_inventory(
         product
@@ -920,7 +896,8 @@ def print_product(
     )
 
     print(
-        f"Warehouse availability: {inventory}"
+        f"Warehouse availability: "
+        f"{inventory}"
     )
 
     print(
@@ -935,62 +912,56 @@ def print_product(
 
 
 # ================================================================
-# API ERROR DIAGNOSTICS
+# DIAGNOSTIC 401
 # ================================================================
 
-def print_api_error(response):
+def print_401_diagnostic(response):
 
     print()
-    print("COSTCO API REQUEST FAILED")
-    print("-" * 70)
+    print("!" * 70)
+    print("COSTCO API RETURNED HTTP 401")
+    print("!" * 70)
 
+    print()
     print(
-        f"HTTP status: {response.status_code}"
+        "Costco's API gateway rejected the request "
+        "before product search."
     )
 
     print()
+    print(
+        "This usually means the Costco storefront "
+        "client identifier/request headers have changed."
+    )
+
+    print()
+    print("Response:")
 
     try:
 
-        error_data = response.json()
+        data = response.json()
 
         print(
-            json.dumps(
-                error_data,
-                indent=2
-            )
+            data
         )
 
     except Exception:
 
         print(
-            response.text[:3000]
+            response.text[:2000]
         )
 
     print()
+    print(
+        "The script will NOT treat this as "
+        "'zero bourbon inventory'."
+    )
 
-    if response.status_code == 401:
+    print(
+        "A 401 means the search could not be performed."
+    )
 
-        print(
-            "DIAGNOSIS:"
-        )
-
-        print(
-            "Costco's API gateway rejected the request "
-            "before returning search results."
-        )
-
-        print(
-            "This is an authentication/request-header issue, "
-            "not a bourbon matching issue."
-        )
-
-        print()
-
-        print(
-            "The next step is to reproduce the exact browser "
-            "request that currently returns HTTP 200."
-        )
+    print("!" * 70)
 
 
 # ================================================================
@@ -1002,11 +973,10 @@ def main():
     start_time = datetime.now()
 
     print("=" * 70)
-
     print(
-        "COSTCO BOURBON RADAR - SEARCH ENGINE V5"
+        "COSTCO BOURBON RADAR - "
+        "SEARCH ENGINE V5"
     )
-
     print("=" * 70)
 
     print(
@@ -1027,20 +997,29 @@ def main():
     print("=" * 70)
 
     # ------------------------------------------------------------
-    # Tracking
+    # Establish browser-like Costco session
+    # ------------------------------------------------------------
+
+    establish_costco_session()
+
+    # ------------------------------------------------------------
+    # Results
     # ------------------------------------------------------------
 
     confirmed_products = {}
-
     review_products = {}
 
     total_results = 0
 
     rejected_count = 0
 
-    successful_requests = 0
+    successful_searches = 0
 
-    failed_requests = 0
+    failed_searches = 0
+
+    credentials_working = None
+
+    active_client_identifier = None
 
     # ------------------------------------------------------------
     # Search
@@ -1057,35 +1036,132 @@ def main():
 
         print("=" * 70)
 
-        response = search_costco(
-            query
-        )
+        response = None
+
+        # --------------------------------------------------------
+        # Try current client identifier first.
+        # If Costco says 401, try the next one.
+        # --------------------------------------------------------
+
+        identifiers_to_try = []
+
+        if active_client_identifier:
+
+            identifiers_to_try.append(
+                active_client_identifier
+            )
+
+        for identifier in CLIENT_IDENTIFIERS:
+
+            if identifier not in identifiers_to_try:
+
+                identifiers_to_try.append(
+                    identifier
+                )
+
+        for client_identifier in identifiers_to_try:
+
+            response = search_costco(
+                query,
+                client_identifier
+            )
+
+            if response is None:
+                continue
+
+            print(
+                f"Client identifier: "
+                f"{client_identifier}"
+            )
+
+            print(
+                f"HTTP: "
+                f"{response.status_code}"
+            )
+
+            if response.status_code == 200:
+
+                active_client_identifier = (
+                    client_identifier
+                )
+
+                credentials_working = True
+
+                break
+
+            if response.status_code == 401:
+
+                continue
+
+            break
+
+        # --------------------------------------------------------
+        # No response
+        # --------------------------------------------------------
 
         if response is None:
 
-            failed_requests += 1
+            failed_searches += 1
 
-            continue
-
-        print(
-            f"HTTP: {response.status_code}"
-        )
-
-        # --------------------------------------------------------
-        # API error
-        # --------------------------------------------------------
-
-        if response.status_code != 200:
-
-            failed_requests += 1
-
-            print_api_error(
-                response
+            print(
+                "REQUEST FAILED."
             )
 
             continue
 
-        successful_requests += 1
+        # --------------------------------------------------------
+        # 401
+        # --------------------------------------------------------
+
+        if response.status_code == 401:
+
+            failed_searches += 1
+
+            credentials_working = False
+
+            print_401_diagnostic(
+                response
+            )
+
+            # Stop here rather than making 20 identical
+            # unauthorized requests.
+
+            print()
+            print(
+                "STOPPING SEARCH."
+            )
+
+            print(
+                "There is no value in sending the "
+                "remaining queries until the Costco "
+                "credential/header issue is resolved."
+            )
+
+            break
+
+        # --------------------------------------------------------
+        # Other HTTP error
+        # --------------------------------------------------------
+
+        if response.status_code != 200:
+
+            failed_searches += 1
+
+            print(
+                "Costco API request failed."
+            )
+
+            try:
+
+                print(
+                    response.text[:2000]
+                )
+
+            except Exception:
+
+                pass
+
+            continue
 
         # --------------------------------------------------------
         # Parse JSON
@@ -1097,20 +1173,13 @@ def main():
 
         except Exception:
 
+            failed_searches += 1
+
             print(
                 "Unable to decode Costco JSON response."
             )
 
-            failed_requests += 1
-
             continue
-
-        # Save latest successful response.
-        save_raw_response(
-            query,
-            response,
-            data
-        )
 
         # --------------------------------------------------------
         # Extract products
@@ -1121,37 +1190,64 @@ def main():
         )
 
         print(
-            f"Results returned: {len(products)}"
+            f"Results returned: "
+            f"{len(products)}"
         )
 
-        total_results += len(
-            products
-        )
+        total_results += len(products)
+
+        successful_searches += 1
 
         if not products:
 
             print(
-                "No products extracted from response."
+                "No Costco products returned."
             )
 
             continue
 
-        query_confirmed = 0
+        # --------------------------------------------------------
+        # Match products
+        # --------------------------------------------------------
 
+        query_confirmed = 0
         query_review = 0
 
-        # --------------------------------------------------------
-        # Evaluate every product against every target
-        # --------------------------------------------------------
+        seen_this_query = set()
 
         for product in products:
 
-            if not isinstance(
-                product,
-                dict
-            ):
-
+            if not isinstance(product, dict):
                 continue
+
+            product_id = get_product_id(
+                product
+            )
+
+            variant_id = get_variant_id(
+                product
+            )
+
+            # ----------------------------------------------------
+            # Prevent duplicate product processing
+            # ----------------------------------------------------
+
+            product_key = (
+                f"{product_id}|"
+                f"{variant_id}|"
+                f"{get_title(product)}"
+            )
+
+            if product_key in seen_this_query:
+                continue
+
+            seen_this_query.add(
+                product_key
+            )
+
+            # ----------------------------------------------------
+            # Test against every target
+            # ----------------------------------------------------
 
             for target_name in TARGETS:
 
@@ -1159,17 +1255,9 @@ def main():
                     status,
                     score,
                     alias,
-                    reason
+                    reason,
                 ) = classify_product(
                     target_name,
-                    product
-                )
-
-                product_id = get_product_id(
-                    product
-                )
-
-                variant_id = get_variant_id(
                     product
                 )
 
@@ -1210,7 +1298,6 @@ def main():
 
                             "reason":
                                 reason,
-
                         }
 
                         print_product(
@@ -1253,7 +1340,6 @@ def main():
 
                             "reason":
                                 reason,
-
                         }
 
         # --------------------------------------------------------
@@ -1262,7 +1348,6 @@ def main():
 
         if query_confirmed:
 
-            print()
             print(
                 f"Confirmed matches: "
                 f"{query_confirmed}"
@@ -1270,7 +1355,6 @@ def main():
 
         elif query_review:
 
-            print()
             print(
                 f"Potential review matches: "
                 f"{query_review}"
@@ -1282,27 +1366,31 @@ def main():
                 "No target bourbon matches found."
             )
 
+        # --------------------------------------------------------
+        # Small delay
+        # --------------------------------------------------------
+
+        time.sleep(0.25)
+
     # ============================================================
     # FINAL REPORT
     # ============================================================
 
     print()
     print("=" * 70)
-
     print(
         "COSTCO BOURBON RADAR COMPLETE"
     )
-
     print("=" * 70)
 
     print(
-        f"Successful API requests: "
-        f"{successful_requests}"
+        f"Successful searches: "
+        f"{successful_searches}"
     )
 
     print(
-        f"Failed API requests: "
-        f"{failed_requests}"
+        f"Failed searches: "
+        f"{failed_searches}"
     )
 
     print(
@@ -1325,17 +1413,15 @@ def main():
         f"{rejected_count}"
     )
 
-    # ============================================================
+    # ------------------------------------------------------------
     # CONFIRMED
-    # ============================================================
+    # ------------------------------------------------------------
 
     print()
     print("=" * 70)
-
     print(
         "CONFIRMED TARGET BOURBONS"
     )
-
     print("=" * 70)
 
     if not confirmed_products:
@@ -1346,37 +1432,26 @@ def main():
 
     else:
 
-        for item in (
-            confirmed_products.values()
-        ):
+        for item in confirmed_products.values():
 
             print_product(
-
                 item["target"],
-
                 item["product"],
-
                 "🎯 CONFIRMED TARGET",
-
                 item["score"],
-
                 item["alias"],
-
                 item["reason"],
-
             )
 
-    # ============================================================
+    # ------------------------------------------------------------
     # REVIEW
-    # ============================================================
+    # ------------------------------------------------------------
 
     print()
     print("=" * 70)
-
     print(
         "POTENTIAL MATCHES REQUIRING REVIEW"
     )
-
     print("=" * 70)
 
     if not review_products:
@@ -1387,29 +1462,59 @@ def main():
 
     else:
 
-        for item in (
-            review_products.values()
-        ):
+        for item in review_products.values():
 
             print_product(
-
                 item["target"],
-
                 item["product"],
-
                 "⚠️ REVIEW",
-
                 item["score"],
-
                 item["alias"],
-
                 item["reason"],
-
             )
 
-    # ============================================================
-    # FINISH
-    # ============================================================
+    # ------------------------------------------------------------
+    # Credential status
+    # ------------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print(
+        "API STATUS"
+    )
+    print("=" * 70)
+
+    if credentials_working is True:
+
+        print(
+            "Costco API credentials: WORKING"
+        )
+
+        print(
+            f"Active client identifier: "
+            f"{active_client_identifier}"
+        )
+
+    elif credentials_working is False:
+
+        print(
+            "Costco API credentials: REJECTED"
+        )
+
+        print(
+            "The search did not complete."
+        )
+
+    else:
+
+        print(
+            "Costco API credentials: "
+            "NOT TESTED"
+        )
+
+    # ------------------------------------------------------------
+    # Finish
+    # ------------------------------------------------------------
 
     elapsed = (
         datetime.now()
@@ -1433,11 +1538,5 @@ def main():
     print("=" * 70)
 
 
-# ================================================================
-# RUN
-# ================================================================
-
 if __name__ == "__main__":
-
     main()
-```
