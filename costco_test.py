@@ -21,14 +21,13 @@ HEADERS = {
 }
 
 SEARCHES = [
-    "1605257",
-    "1740448",
-    "Jack Daniel",
-    "Weller",
-    "Blanton",
-    "Eagle Rare",
-    "Old Forester",
-    "E.H. Taylor",
+    "1737672",
+    "1934031",
+    "1499833",
+    "149017",
+    "775642",
+    "749176",
+    "749187",
 ]
 
 for query in SEARCHES:
