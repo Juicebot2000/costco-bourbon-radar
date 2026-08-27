@@ -3,34 +3,71 @@ import json
 import re
 from datetime import datetime
 
-# ============================================================
-# COSTCO BOURBON RADAR - SEARCH ENGINE V2
-# ============================================================
+# ==============================================================
+# COSTCO BOURBON RADAR V3
+# ==============================================================
+# Purpose:
+#   Search Costco's GDX API and identify potential bourbon products.
+#
+# IMPORTANT:
+#   This version is intentionally more diagnostic.
+#   It shows candidate products instead of relying on overly
+#   strict exact-name matching.
+# ==============================================================
+
+
+# --------------------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------------------
 
 ENDPOINT = "https://gdx-api.costco.com/catalog/search/api/v1/search"
 
-WAREHOUSE = "471-wh"
+WAREHOUSE_ID = "471-wh"
 ZIP_CODE = "95765"
+STATE = "CA"
 
 VISITOR_ID = "81593075349571012370904879373705132128"
 
+CLIENT_IDENTIFIER = "168287ea-1201-45f6-9b45-5bbea49f8ee7"
+
+
+# --------------------------------------------------------------
+# SEARCH TERMS
+# --------------------------------------------------------------
+
 SEARCHES = [
+    "Jack Daniel's",
     "Jack Daniel's Tennessee Whiskey",
     "Jack Daniel's Single Barrel",
     "Jack Daniel's 10",
     "Jack Daniel's 12",
     "Jack Daniel's 14",
+
+    "Old Forester",
     "Old Forester Whiskey",
     "Old Forester 1924",
+
+    "Weller",
     "Weller Bourbon",
     "Weller Full Proof",
     "Weller Antique 107",
+
+    "Eagle Rare",
     "Eagle Rare Bourbon",
+
+    "Blanton's",
     "Blanton's Bourbon",
     "Blanton's Gold",
+
+    "E.H. Taylor",
     "E.H. Taylor Bourbon",
     "E.H. Taylor Barrel Proof",
 ]
+
+
+# --------------------------------------------------------------
+# COSTCO DELIVERY LOCATIONS
+# --------------------------------------------------------------
 
 DELIVERY_LOCATIONS = [
     "653-bd",
@@ -72,6 +109,11 @@ DELIVERY_LOCATIONS = [
     "9847-wcs",
 ]
 
+
+# --------------------------------------------------------------
+# HEADERS
+# --------------------------------------------------------------
+
 HEADERS = {
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
@@ -83,19 +125,55 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/149.0.0.0 Safari/537.36"
     ),
-    "client-identifier": "168287ea-1201-45f6-9b45-5bbea49f8ee7",
+
+    "client-identifier": CLIENT_IDENTIFIER,
     "client_id": "USBC",
     "locale": "en-US",
     "searchResultProvider": "GRS",
+
+    "sec-ch-ua": (
+        '"Google Chrome";v="149", '
+        '"Chromium";v="149", '
+        '"Not)A;Brand";v="24"'
+    ),
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
 }
 
 
-def search_costco(search_term):
+# --------------------------------------------------------------
+# NORMALIZE TEXT
+# --------------------------------------------------------------
+
+def normalize(text):
     """
-    Send a request that reproduces the successful Chrome request.
+    Normalize text so matching is easier.
     """
 
-    payload = {
+    if not text:
+        return ""
+
+    text = str(text).lower()
+
+    # Normalize apostrophes
+    text = text.replace("’", "'")
+
+    # Remove punctuation
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+# --------------------------------------------------------------
+# BUILD SEARCH REQUEST
+# --------------------------------------------------------------
+
+def build_payload(search_term):
+
+    return {
         "visitorId": VISITOR_ID,
         "query": search_term,
         "pageSize": 24,
@@ -103,255 +181,616 @@ def search_costco(search_term):
         "orderBy": None,
         "searchMode": "page",
         "personalizationEnabled": True,
-        "warehouseId": WAREHOUSE,
+        "warehouseId": WAREHOUSE_ID,
         "shipToPostal": ZIP_CODE,
-        "shipToState": "CA",
+        "shipToState": STATE,
         "deliveryLocations": DELIVERY_LOCATIONS,
-        "filterBy": ["HIDE_OUT_OF_STOCK"],
-        "pageCategories": [],
+        "filterBy": [
+            "HIDE_OUT_OF_STOCK"
+        ],
+        "pageCategories": []
     }
 
-    response = requests.post(
-        ENDPOINT,
-        headers=HEADERS,
-        json=payload,
-        timeout=30,
-    )
 
-    return response
+# --------------------------------------------------------------
+# EXTRACT PRICE
+# --------------------------------------------------------------
 
+def extract_price(rollup):
 
-def is_bourbon_product(product):
-    """
-    Determine whether the returned Costco product actually looks
-    like a whiskey/bourbon product.
+    if not isinstance(rollup, dict):
+        return None
 
-    This prevents false positives from unrelated products.
-    """
+    # Warehouse-specific price is preferred
+    warehouse_key = f"inventory({WAREHOUSE_ID}, price)"
 
-    title = product.get("title", "")
-    brand = " ".join(product.get("brands", []))
+    if warehouse_key in rollup:
+        values = rollup.get(warehouse_key)
 
-    categories = product.get("categories", [])
-    category_text = " ".join(categories)
+        if isinstance(values, list) and values:
+            return values[0]
 
-    attributes = product.get("attributes", {})
+    # Fall back to normal price
+    values = rollup.get("price")
 
-    searchable_text = " ".join([
-        title,
-        brand,
-        category_text,
-        json.dumps(attributes),
-    ]).lower()
+    if isinstance(values, list) and values:
+        return values[0]
 
-    whiskey_terms = [
-        "bourbon",
-        "whiskey",
-        "whisky",
-        "tennessee whiskey",
-        "straight bourbon",
-        "straight whiskey",
-    ]
-
-    return any(term in searchable_text for term in whiskey_terms)
+    return None
 
 
-def get_warehouse_data(result):
-    """
-    Extract inventory and price information specifically for
-    the requested Costco warehouse.
-    """
+# --------------------------------------------------------------
+# EXTRACT WAREHOUSE AVAILABILITY
+# --------------------------------------------------------------
 
-    rollup = result.get("variantRollupValues", {})
+def extract_availability(rollup):
 
-    availability_key = (
-        f"inventory({WAREHOUSE}, attributes.availability)"
-    )
+    if not isinstance(rollup, dict):
+        return None
 
-    price_key = f"inventory({WAREHOUSE}, price)"
+    key = f"inventory({WAREHOUSE_ID}, attributes.availability)"
 
-    availability = rollup.get(availability_key)
-    price = rollup.get(price_key)
+    value = rollup.get(key)
 
-    return availability, price
+    if isinstance(value, list):
+        return value
 
-
-def matches_target(product, search_term):
-    """
-    Determine whether a genuine whiskey product appears relevant
-    to the search term.
-    """
-
-    title = product.get("title", "").lower()
-    brand = " ".join(product.get("brands", [])).lower()
-
-    combined = f"{title} {brand}"
-
-    # Remove punctuation for easier matching.
-    normalized = re.sub(r"[^a-z0-9 ]", " ", combined)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-
-    search_normalized = re.sub(
-        r"[^a-z0-9 ]",
-        " ",
-        search_term.lower()
-    )
-
-    search_normalized = re.sub(
-        r"\s+",
-        " ",
-        search_normalized
-    ).strip()
-
-    # Brand-specific matching.
-    if "jack daniel" in search_term.lower():
-        return "jack daniel" in normalized
-
-    if "old forester" in search_term.lower():
-        return "old forester" in normalized
-
-    if "weller" in search_term.lower():
-        return "weller" in normalized
-
-    if "eagle rare" in search_term.lower():
-        return "eagle rare" in normalized
-
-    if "blanton" in search_term.lower():
-        return "blanton" in normalized
-
-    if "e.h. taylor" in search_term.lower():
-        return (
-            "e h taylor" in normalized
-            or "eh taylor" in normalized
-            or "taylor" in normalized
-        )
-
-    return search_normalized in normalized
+    return value
 
 
-def print_product(result):
-    """
-    Print useful information about a matching product.
-    """
+# --------------------------------------------------------------
+# GET PRODUCT TEXT
+# --------------------------------------------------------------
+
+def get_product_text(result):
 
     product = result.get("product", {})
 
-    title = product.get("title", "Unknown")
-    product_id = result.get("id", "Unknown")
+    title = product.get("title", "")
+    brand = product.get("brands", [])
+    categories = product.get("categories", [])
 
-    brands = product.get("brands", [])
+    if not isinstance(brand, list):
+        brand = [str(brand)]
+
+    if not isinstance(categories, list):
+        categories = [str(categories)]
+
+    text_parts = [
+        title,
+        " ".join(brand),
+        " ".join(categories),
+    ]
+
+    # Also inspect variants
     variants = product.get("variants", [])
 
-    availability, warehouse_price = get_warehouse_data(result)
+    if isinstance(variants, list):
 
-    print("PRODUCT")
+        for variant in variants:
+
+            if not isinstance(variant, dict):
+                continue
+
+            text_parts.append(
+                variant.get("title", "")
+            )
+
+            attributes = variant.get(
+                "attributes",
+                {}
+            )
+
+            if isinstance(attributes, dict):
+
+                for value in attributes.values():
+
+                    if not isinstance(value, dict):
+                        continue
+
+                    text_parts.extend(
+                        value.get("text", [])
+                    )
+
+    return normalize(" ".join(
+        str(x) for x in text_parts if x
+    ))
+
+
+# --------------------------------------------------------------
+# BOURBON KEYWORDS
+# --------------------------------------------------------------
+
+BOURBON_WORDS = [
+    "bourbon",
+    "whiskey",
+    "whisky",
+    "tennessee whiskey",
+]
+
+
+# --------------------------------------------------------------
+# TARGET MATCHING
+# --------------------------------------------------------------
+
+def calculate_match_score(search_term, result):
+
+    product = result.get("product", {})
+
+    title = normalize(
+        product.get("title", "")
+    )
+
+    brands = product.get("brands", [])
+
+    if not isinstance(brands, list):
+        brands = [brands]
+
+    brand_text = normalize(
+        " ".join(str(x) for x in brands)
+    )
+
+    categories = product.get("categories", [])
+
+    if not isinstance(categories, list):
+        categories = [categories]
+
+    category_text = normalize(
+        " ".join(str(x) for x in categories)
+    )
+
+    all_text = get_product_text(result)
+
+    score = 0
+
+    # ----------------------------------------------------------
+    # BRAND MATCHING
+    # ----------------------------------------------------------
+
+    if "jack daniel" in all_text:
+        score += 50
+
+    if "old forester" in all_text:
+        score += 50
+
+    if "weller" in all_text:
+        score += 50
+
+    if "eagle rare" in all_text:
+        score += 50
+
+    if "blanton" in all_text:
+        score += 50
+
+    if "eh taylor" in all_text:
+        score += 50
+
+    if "e h taylor" in all_text:
+        score += 50
+
+    # ----------------------------------------------------------
+    # BOURBON / WHISKEY
+    # ----------------------------------------------------------
+
+    if "bourbon" in all_text:
+        score += 20
+
+    if "whiskey" in all_text:
+        score += 10
+
+    # ----------------------------------------------------------
+    # SPECIFIC AGE / EXPRESSION
+    # ----------------------------------------------------------
+
+    search_normalized = normalize(search_term)
+
+    if "10" in search_normalized and "10" in title:
+        score += 30
+
+    if "12" in search_normalized and "12" in title:
+        score += 30
+
+    if "14" in search_normalized and "14" in title:
+        score += 30
+
+    if "1924" in search_normalized and "1924" in title:
+        score += 40
+
+    if "full proof" in search_normalized and "full proof" in all_text:
+        score += 40
+
+    if "107" in search_normalized and "107" in all_text:
+        score += 40
+
+    if "gold" in search_normalized and "gold" in all_text:
+        score += 40
+
+    if "barrel proof" in search_normalized and "barrel proof" in all_text:
+        score += 40
+
+    # ----------------------------------------------------------
+    # WAREHOUSE INVENTORY
+    # ----------------------------------------------------------
+
+    rollup = result.get(
+        "variantRollupValues",
+        {}
+    )
+
+    availability = extract_availability(
+        rollup
+    )
+
+    if availability:
+
+        if isinstance(availability, list):
+
+            if "IN_STOCK" in availability:
+                score += 25
+
+        elif availability == "IN_STOCK":
+            score += 25
+
+    return score
+
+
+# --------------------------------------------------------------
+# DISPLAY RESULT
+# --------------------------------------------------------------
+
+def display_result(search_term, result, score):
+
+    product = result.get(
+        "product",
+        {}
+    )
+
+    title = product.get(
+        "title",
+        "UNKNOWN"
+    )
+
+    brands = product.get(
+        "brands",
+        []
+    )
+
+    product_id = result.get(
+        "id",
+        ""
+    )
+
+    variants = product.get(
+        "variants",
+        []
+    )
+
+    variant_id = ""
+
+    if isinstance(variants, list) and variants:
+
+        variant_id = variants[0].get(
+            "id",
+            ""
+        )
+
+    rollup = result.get(
+        "variantRollupValues",
+        {}
+    )
+
+    availability = extract_availability(
+        rollup
+    )
+
+    price = extract_price(
+        rollup
+    )
+
+    url = product.get(
+        "uri",
+        ""
+    )
+
+    print()
+    print("POTENTIAL BOURBON")
     print("-" * 70)
+
+    print(f"Match score: {score}")
+
     print(f"Title: {title}")
+
     print(f"Brand: {brands}")
+
     print(f"Product ID: {product_id}")
 
-    if variants:
-        for variant in variants:
-            print(f"Variant ID: {variant.get('id')}")
-            print(f"Variant title: {variant.get('title')}")
+    print(f"Variant ID: {variant_id}")
 
-    print(f"Warehouse: {WAREHOUSE}")
-    print(f"Warehouse availability: {availability}")
-    print(f"Warehouse price: {warehouse_price}")
+    print(f"Warehouse: {WAREHOUSE_ID}")
 
-    print(f"Costco URL: {result.get('uri', '')}")
-    print()
+    print(
+        f"Warehouse availability: "
+        f"{availability}"
+    )
 
+    print(
+        f"Warehouse price: "
+        f"{price}"
+    )
+
+    print(f"URL: {url}")
+
+
+# --------------------------------------------------------------
+# SEARCH COSTCO
+# --------------------------------------------------------------
+
+def search_costco(search_term):
+
+    payload = build_payload(
+        search_term
+    )
+
+    try:
+
+        response = requests.post(
+            ENDPOINT,
+            headers=HEADERS,
+            json=payload,
+            timeout=30
+        )
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            f"REQUEST ERROR: {e}"
+        )
+
+        return None
+
+    print(
+        f"HTTP: {response.status_code}"
+    )
+
+    if response.status_code != 200:
+
+        print(
+            "ERROR RESPONSE:"
+        )
+
+        print(
+            response.text[:2000]
+        )
+
+        return None
+
+    try:
+
+        data = response.json()
+
+    except json.JSONDecodeError:
+
+        print(
+            "ERROR: Costco response "
+            "was not valid JSON."
+        )
+
+        return None
+
+    results = (
+        data
+        .get("searchResult", {})
+        .get("results", [])
+    )
+
+    print(
+        f"Results returned: "
+        f"{len(results)}"
+    )
+
+    return results
+
+
+# --------------------------------------------------------------
+# MAIN
+# --------------------------------------------------------------
 
 def main():
 
     print("=" * 70)
-    print("COSTCO BOURBON RADAR - SEARCH ENGINE V2")
-    print("=" * 70)
-    print(f"Warehouse: {WAREHOUSE}")
-    print(f"ZIP: {ZIP_CODE}")
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(
+        "COSTCO BOURBON RADAR - SEARCH ENGINE V3"
+    )
     print("=" * 70)
 
-    total_matches = 0
+    print(
+        f"Warehouse: {WAREHOUSE_ID}"
+    )
+
+    print(
+        f"ZIP: {ZIP_CODE}"
+    )
+
+    print(
+        f"Started: "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    print("=" * 70)
+
+    total_candidates = 0
 
     for search_term in SEARCHES:
 
         print()
         print("=" * 70)
-        print(f"SEARCH: {search_term}")
+
+        print(
+            f"SEARCH: {search_term}"
+        )
+
         print("=" * 70)
 
-        try:
+        results = search_costco(
+            search_term
+        )
 
-            response = search_costco(search_term)
+        if results is None:
+            continue
 
-            print(f"HTTP: {response.status_code}")
+        if not results:
 
-            if response.status_code != 200:
-                print("ERROR RESPONSE:")
-                print(response.text[:2000])
-                continue
-
-            try:
-                data = response.json()
-            except Exception:
-                print("ERROR: Costco response was not valid JSON.")
-                print(response.text[:2000])
-                continue
-
-            results = (
-                data
-                .get("searchResult", {})
-                .get("results", [])
+            print(
+                "No results."
             )
 
-            print(f"Results returned: {len(results)}")
+            continue
 
-            matches = []
+        scored_results = []
 
-            for result in results:
+        for result in results:
 
-                product = result.get("product", {})
+            score = calculate_match_score(
+                search_term,
+                result
+            )
 
-                # First make sure it is actually a whiskey/bourbon.
-                if not is_bourbon_product(product):
-                    continue
+            scored_results.append(
+                (score, result)
+            )
 
-                # Then verify it actually matches our target.
-                if not matches_target(product, search_term):
-                    continue
+        # Highest scoring first
+        scored_results.sort(
+            key=lambda x: x[0],
+            reverse=True
+        )
 
-                matches.append(result)
+        # ------------------------------------------------------
+        # IMPORTANT:
+        # Show the top candidates even if their score is low.
+        # This lets us see what Costco is actually returning.
+        # ------------------------------------------------------
 
-            if not matches:
+        shown = 0
 
-                print("No matching bourbon products found.")
+        for score, result in scored_results:
 
-            else:
+            # Only show meaningful candidates
+            if score >= 40:
 
-                print(f"VALID BOURBON MATCHES: {len(matches)}")
+                display_result(
+                    search_term,
+                    result,
+                    score
+                )
 
-                for result in matches:
-                    total_matches += 1
-                    print_product(result)
+                shown += 1
+                total_candidates += 1
 
-        except requests.exceptions.Timeout:
-            print("ERROR: Costco request timed out.")
+                if shown >= 5:
+                    break
 
-        except requests.exceptions.RequestException as e:
-            print(f"REQUEST ERROR: {e}")
+        # ------------------------------------------------------
+        # DIAGNOSTIC MODE
+        # ------------------------------------------------------
 
-        except Exception as e:
-            print(f"UNEXPECTED ERROR: {repr(e)}")
+        if shown == 0:
 
-    print()
+            print()
+            print(
+                "No high-confidence bourbon "
+                "matches."
+            )
+
+            print()
+            print(
+                "TOP COSTCO SEARCH RESULTS:"
+            )
+
+            print("-" * 70)
+
+            for score, result in scored_results[:5]:
+
+                product = result.get(
+                    "product",
+                    {}
+                )
+
+                title = product.get(
+                    "title",
+                    "UNKNOWN"
+                )
+
+                brands = product.get(
+                    "brands",
+                    []
+                )
+
+                product_id = result.get(
+                    "id",
+                    ""
+                )
+
+                rollup = result.get(
+                    "variantRollupValues",
+                    {}
+                )
+
+                availability = (
+                    extract_availability(
+                        rollup
+                    )
+                )
+
+                price = extract_price(
+                    rollup
+                )
+
+                print(
+                    f"[Score {score}] "
+                    f"{title}"
+                )
+
+                print(
+                    f"    Brand: {brands}"
+                )
+
+                print(
+                    f"    Product ID: "
+                    f"{product_id}"
+                )
+
+                print(
+                    f"    Availability: "
+                    f"{availability}"
+                )
+
+                print(
+                    f"    Price: "
+                    f"{price}"
+                )
+
+                print()
+
     print("=" * 70)
-    print("COSTCO BOURBON RADAR COMPLETE")
-    print("=" * 70)
-    print(f"Total valid bourbon matches: {total_matches}")
+
+    print(
+        "COSTCO BOURBON RADAR COMPLETE"
+    )
+
     print("=" * 70)
 
+    print(
+        f"Total candidate matches: "
+        f"{total_candidates}"
+    )
+
+    print("=" * 70)
+
+
+# --------------------------------------------------------------
+# RUN
+# --------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
