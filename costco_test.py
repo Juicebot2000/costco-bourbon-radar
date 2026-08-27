@@ -5,14 +5,12 @@ import re
 URL = "https://gdx-api.costco.com/catalog/search/api/v1/search"
 
 SEARCHES = [
-    "Jack Daniel's 10 Year",
-    "Jack Daniel's 12 Year",
-    "Jack Daniel's 14 Year",
-    "Old Forester 1924",
-    "Weller Full Proof",
+    "Jack Daniel's",
+    "Old Forester",
+    "Weller",
     "Eagle Rare",
-    "Blanton's Gold",
-    "EH Taylor Barrel Proof",
+    "Blanton's",
+    "EH Taylor",
 ]
 
 WAREHOUSE = "471-wh"
@@ -122,7 +120,6 @@ def search_costco(query):
             "eagle rare",
             "blanton",
             "taylor",
-            "bourbon"
         ]
 
         if not any(term in text for term in bourbon_terms):
